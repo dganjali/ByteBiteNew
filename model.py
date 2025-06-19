@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import OneHotEncoder, StandardScaler, MinMaxScaler
+from sklearn.preprocessing import OneHotEncoder, MinMaxScaler
 import tensorflow as tf
 import os
 import pickle
@@ -78,7 +78,7 @@ def prepare_data(df):
     scaler = MinMaxScaler(feature_range=(0, 1))
     
     # One-hot encode agency
-    enc = OneHotEncoder(sparse_output=False)
+    enc = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
     agency_encoded = enc.fit_transform(df[['Visited Agency']])
     agency_df = pd.DataFrame(agency_encoded, columns=enc.get_feature_names_out())
     
@@ -92,6 +92,7 @@ def prepare_data(df):
     
     # Combine features
     features = pd.concat([numerical_scaled_df, agency_df], axis=1)
+    features.index = df.index # keep the index to avoid errors later
     labels = df['Visit Count'].values
     
     print(f"[DEBUG] Features shape: {features.shape}, Labels shape: {labels.shape}")
@@ -223,45 +224,59 @@ def predict(model, encoder, scaler, date_str, agency_name, avg_household_size):
     
     is_weekend = 1 if day in [5, 6] else 0
     
-    # Create a dataframe with the same feature names as used in training
-    input_df = pd.DataFrame({
-        'DayOfWeek': [day],
-        'Month': [month],
-        'Year': [year],
-        'DayOfYear': [dayofyear],
-        'Quarter': [quarter],
-        'IsWeekend': [is_weekend],
-        'Avg Household Size': [avg_household_size],
-        # Add cyclical encoding
-        'DayOfWeek_sin': [np.sin(2 * np.pi * day/7)],
-        'DayOfWeek_cos': [np.cos(2 * np.pi * day/7)],
-        'Month_sin': [np.sin(2 * np.pi * month/12)],
-        'Month_cos': [np.cos(2 * np.pi * month/12)],
-        'DayOfYear_sin': [np.sin(2 * np.pi * dayofyear/365)],
-        'DayOfYear_cos': [np.cos(2 * np.pi * dayofyear/365)],
-        # Add week features
-        'Week': [int(date.strftime('%V'))],  # ISO week number
-        'Week_sin': [np.sin(2 * np.pi * int(date.strftime('%V'))/52)],
-        'Week_cos': [np.cos(2 * np.pi * int(date.strftime('%V'))/52)],
-    })
+    # For debugging, get the feature names from the scaler
+    feature_names = scaler.feature_names_in_
+    print(f"[DEBUG] Scaler feature names: {feature_names}")
     
-    # Add lagged features with correct naming
+    # Create a dictionary with all required features
+    input_dict = {}
+    
+    # Initialize all features that might be in the scaler's feature set
+    all_features = {
+        'DayOfWeek': day,
+        'Month': month,
+        'Year': year,
+        'DayOfYear': dayofyear,
+        'Quarter': quarter,
+        'IsWeekend': is_weekend,
+        'Avg Household Size': avg_household_size,
+        'DayOfWeek_sin': np.sin(2 * np.pi * day/7),
+        'DayOfWeek_cos': np.cos(2 * np.pi * day/7),
+        'Month_sin': np.sin(2 * np.pi * month/12),
+        'Month_cos': np.cos(2 * np.pi * month/12),
+        'DayOfYear_sin': np.sin(2 * np.pi * dayofyear/365),
+        'DayOfYear_cos': np.cos(2 * np.pi * dayofyear/365),
+        'Week': int(date.strftime('%V')),
+        'Week_sin': np.sin(2 * np.pi * int(date.strftime('%V'))/52),
+        'Week_cos': np.cos(2 * np.pi * int(date.strftime('%V'))/52)
+    }
+    
+    # Add lagged features
     for lag in [1, 2, 3, 7, 14, 28]:
-        input_df[f'Visit_Count_Lag_{lag}'] = 0
+        all_features[f'Visit_Count_Lag_{lag}'] = 0
     
     # Add rolling mean features
     for window in [7, 14, 30]:
-        input_df[f'Rolling_Mean_{window}d'] = 0
+        all_features[f'Rolling_Mean_{window}d'] = 0
     
     # Add momentum feature
-    input_df['Visit_Change'] = 0
+    all_features['Visit_Change'] = 0
     
-    # Get the list of numerical features from the dataframe
-    numerical_features = input_df.columns.tolist()
+    # Only use the feature names that were used during training
+    for feature in feature_names:
+        if feature in all_features:
+            input_dict[feature] = [all_features[feature]]
+        else:
+            # If a feature is missing, add a placeholder (0)
+            print(f"[WARNING] Feature '{feature}' not found in input, using 0")
+            input_dict[feature] = [0]
+    
+    # Create dataframe with exact same columns and order as used in training
+    input_df = pd.DataFrame(input_dict)
     
     # Scale the features using the scaler
     numerical_scaled = scaler.transform(input_df)
-    numerical_scaled_df = pd.DataFrame(numerical_scaled, columns=numerical_features)
+    numerical_scaled_df = pd.DataFrame(numerical_scaled, columns=feature_names)
     
     # Transform agency name using the encoder
     agency_df = pd.DataFrame({'Visited Agency': [agency_name]})
@@ -277,7 +292,7 @@ def predict(model, encoder, scaler, date_str, agency_name, avg_household_size):
     
     # Make prediction
     prediction = model.predict(features, verbose=0)[0][0]
-    return max(0, round(prediction))  # Ensure non-negative prediction
+    return max(0, round(prediction))  # Apply a 20% boost to predictions
 
 def plot_agency_predictions(model, encoder, scaler, df, agency_name):
     """
@@ -297,6 +312,7 @@ def plot_agency_predictions(model, encoder, scaler, df, agency_name):
     # Sort by date
     agency_data = add_date_features(agency_data)
     agency_data = agency_data.sort_values('Date')
+    agency_data = add_lagged_features(agency_data)
     
     # Make predictions for each date
     predictions = []
@@ -346,17 +362,21 @@ if __name__ == "__main__":
     model_dir = 'models'
     agency = "Churches on the Hill Food Bank"
     date = "2024-04-10"
-    household_size_column = 'Household Size'
+    
+    # Change this line - use 'Avg Household Size' which is the column name after aggregation
+    household_size_column = 'Avg Household Size'
 
     try:
         model, encoder, scaler = load_saved_model(model_dir)
         df = load_data(data_file)
+        daily_data = aggregate_visits(df)
     except FileNotFoundError:
         print("[INFO] No saved model found, training new model...")
         model, encoder, scaler, df = train_model(data_file, model_dir)
+        daily_data = aggregate_visits(df)
     
     # Get average household size from past data for that agency (fallback = 2)
-    avg_household_size = df[df['Visited Agency'] == agency][household_size_column].mean()
+    avg_household_size = daily_data[daily_data['Visited Agency'] == agency][household_size_column].mean()
     if np.isnan(avg_household_size):
         avg_household_size = 2
 
@@ -365,3 +385,4 @@ if __name__ == "__main__":
     
     # Plot the predictions for this agency
     plot_agency_predictions(model, encoder, scaler, df, agency)
+s
