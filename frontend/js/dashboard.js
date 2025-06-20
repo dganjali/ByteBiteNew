@@ -333,4 +333,122 @@ document.addEventListener("DOMContentLoaded", async () => {
             refreshButton.disabled = false;
         }
     });
+
+    // === Visitor Prediction Section ===
+    const agencySelect = document.getElementById('agency-select');
+    const predictionDate = document.getElementById('prediction-date');
+    const getPredictionBtn = document.getElementById('get-prediction');
+    const predictionResult = document.getElementById('prediction-result');
+
+    // Fetch agencies and populate dropdown
+    async function loadAgencies() {
+        try {
+            const response = await fetch(`${API_BASE}/api/agencies`);
+            const data = await response.json();
+            if (data.success) {
+                agencySelect.innerHTML = '';
+                data.agencies.forEach(agency => {
+                    const option = document.createElement('option');
+                    option.value = agency;
+                    option.textContent = agency;
+                    agencySelect.appendChild(option);
+                });
+            } else {
+                agencySelect.innerHTML = '<option>Error loading agencies</option>';
+            }
+        } catch (err) {
+            agencySelect.innerHTML = '<option>Error loading agencies</option>';
+        }
+    }
+
+    // Handle prediction button click
+    getPredictionBtn.addEventListener('click', async () => {
+        const agency = agencySelect.value;
+        const date = predictionDate.value;
+        if (!agency || !date) {
+            predictionResult.textContent = 'Please select a foodbank and date.';
+            return;
+        }
+        predictionResult.textContent = 'Loading...';
+        try {
+            const response = await fetch(`${API_BASE}/api/visitor_prediction`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ agency, date })
+            });
+            const data = await response.json();
+            if (data.success) {
+                predictionResult.textContent = `Predicted visitors for ${agency} on ${date}: ${data.predicted_visits}`;
+            } else {
+                predictionResult.textContent = 'Prediction error: ' + (data.error || 'Unknown error');
+            }
+        } catch (err) {
+            predictionResult.textContent = 'Prediction error: ' + err.message;
+        }
+    });
+
+    // Load agencies on page load
+    loadAgencies();
+
+    // === Tab and Sidebar Navigation ===
+    const tabs = document.querySelectorAll('.tab');
+    const tabContents = document.querySelectorAll('.tab-content');
+    const sidebarLinks = document.querySelectorAll('.sidebar-link');
+
+    function showTab(tabId) {
+        tabContents.forEach(tc => tc.style.display = tc.id === tabId ? '' : 'none');
+        tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === tabId));
+        sidebarLinks.forEach(l => l.classList.toggle('active', l.dataset.tab === tabId));
+    }
+
+    tabs.forEach(tab => {
+        tab.addEventListener('click', () => showTab(tab.dataset.tab));
+    });
+    sidebarLinks.forEach(link => {
+        link.addEventListener('click', (e) => {
+            e.preventDefault();
+            showTab(link.dataset.tab);
+        });
+    });
+    // Show default tab
+    showTab('inventory-tab');
+
+    // === Summary Widgets ===
+    const widgetTotalItems = document.getElementById('widget-total-items');
+    const widgetExpiringSoon = document.getElementById('widget-expiring-soon');
+    const widgetWeeklyVisitors = document.getElementById('widget-weekly-visitors');
+
+    function updateSummaryWidgets(inventoryData) {
+        widgetTotalItems.textContent = inventoryData.length;
+        // Expiring soon: items with days_until_expiry <= 7
+        const expiringSoon = inventoryData.filter(item => item.days_until_expiry <= 7).length;
+        widgetExpiringSoon.textContent = expiringSoon;
+        // Weekly visitors: sum of weekly_customers
+        const totalVisitors = inventoryData.reduce((sum, item) => sum + (item.weekly_customers || 0), 0);
+        widgetWeeklyVisitors.textContent = totalVisitors;
+    }
+
+    // Patch fetchInventory to update widgets
+    const originalFetchInventory = fetchInventory;
+    fetchInventory = async function() {
+        try {
+            const response = await fetch(`${API_BASE}/api/inventory`, {
+                headers: {
+                    'Authorization': `Bearer ${token}`
+                }
+            });
+            const inventoryData = await response.json();
+            inventoryBody.innerHTML = "";
+            inventoryData.forEach(item => {
+                const row = createInventoryRow(item);
+                inventoryBody.appendChild(row);
+            });
+            // Update widgets
+            updateSummaryWidgets(inventoryData);
+            // Fetch distribution plan
+            await fetchDistributionPlan(inventoryData);
+        } catch (error) {
+            console.error("Failed to load inventory data", error);
+        }
+    };
 });

@@ -10,6 +10,7 @@ from foodbank_regression import FoodBankDatabase, FoodBankDistributionModel
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
+from predict.model import load_saved_model, predict as predict_visitors, load_data, aggregate_visits
 
 app = Flask(__name__)
 CORS(app, 
@@ -95,6 +96,41 @@ def predict():
             'success': False,
             'error': str(e)
         }), 500
+
+@app.route('/api/agencies', methods=['GET'])
+def get_agencies():
+    try:
+        # Use the first visits file for now (can be improved to aggregate all)
+        visits_path = 'backend-model/predict/data/2024visits1.xlsx'
+        df = load_data(visits_path)
+        agencies = df['Visited Agency'].dropna().unique().tolist()
+        return jsonify({'success': True, 'agencies': agencies})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/visitor_prediction', methods=['POST'])
+def visitor_prediction():
+    try:
+        data = request.json
+        agency = data.get('agency')
+        date = data.get('date')  # Expecting 'YYYY-MM-DD'
+        if not agency or not date:
+            return jsonify({'success': False, 'error': 'Missing agency or date'}), 400
+
+        # Load model, encoder, scaler
+        model, encoder, scaler = load_saved_model('backend-model/predict/models')
+        # Load data to get avg household size
+        visits_path = 'backend-model/predict/data/2024visits1.xlsx'
+        df = load_data(visits_path)
+        daily_data = aggregate_visits(df)
+        avg_household_size = daily_data[daily_data['Visited Agency'] == agency]['Avg Household Size'].mean()
+        if np.isnan(avg_household_size):
+            avg_household_size = 2
+        # Predict
+        predicted_visits = predict_visitors(model, encoder, scaler, date, agency, avg_household_size)
+        return jsonify({'success': True, 'predicted_visits': predicted_visits})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 if __name__ == '__main__':
     if len(sys.argv) > 1:
